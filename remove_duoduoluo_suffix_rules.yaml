@@ -1,0 +1,5 @@
+remove_patterns:
+  - "\\s*[｜|]\\s*多多罗出品"
+  - "\\s*[｜|]\\s*多多罗"
+
+file_extensions: "m4a"

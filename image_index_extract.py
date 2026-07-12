@@ -24,6 +24,8 @@
 输出：
   默认写入 output/image_index_extract/image_index_results.json
   output/image_index_extract/image_index_results.csv
+  按 sequence + file_name 去重后的 output/image_index_extract/image_index_results_deduped.json
+  output/image_index_extract/image_index_results_deduped.csv
   和最终去重映射 output/image_index_extract/sequence_name_map.json，并在控制台输出汇总 JSON。
 """
 
@@ -116,9 +118,13 @@ def _summary(result: dict[str, Any]) -> dict[str, Any]:
         "error_count": result["error_count"],
         "json_path": result["json_path"],
         "csv_path": result["csv_path"],
+        "deduped_json_path": result["deduped_json_path"],
+        "deduped_csv_path": result["deduped_csv_path"],
         "mapping_path": result["mapping_path"],
+        "unique_item_count": result.get("dedupe", {}).get("unique_item_count", 0),
         "unique_sequence_count": result.get("dedupe", {}).get("unique_sequence_count", 0),
         "duplicate_item_count": result.get("dedupe", {}).get("duplicate_item_count", 0),
+        "duplicate_key_count": result.get("dedupe", {}).get("duplicate_key_count", 0),
         "conflict_count": result.get("dedupe", {}).get("conflict_count", 0),
     }
 

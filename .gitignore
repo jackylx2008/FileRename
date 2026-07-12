@@ -8,6 +8,7 @@
 *.yaml
 !config.yaml
 !rename_rules.yaml
+!remove_duoduoluo_suffix_rules.yaml
 *.json
 *.ini
 *.ttf

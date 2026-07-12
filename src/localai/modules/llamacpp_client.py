@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import time
@@ -10,6 +11,8 @@ from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -57,30 +60,53 @@ class LlamaCppClient:
         self._process: subprocess.Popen[bytes] | None = None
 
     def ensure_server(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        logger.info(
+            "检查本地 AI 服务: base_url=%s, model=%s, autostart=%s",
+            self.config.base_url,
+            self.config.model,
+            self.config.autostart,
+        )
         if self.is_healthy():
+            logger.info("本地 AI 服务已可用，无需启动。")
             return self.health(), self.models()
 
         if not self.config.autostart:
+            logger.error("本地 AI 服务不可用，且 LLAMACPP_AUTOSTART=false。")
             raise RuntimeError(
                 "llama.cpp service is not available and LLAMACPP_AUTOSTART is false. "
                 "Start llama-server first or enable autostart in common.env."
             )
 
+        logger.info("本地 AI 服务不可用，开始自动启动 llama.cpp 服务。")
         self.start_server()
         deadline = time.time() + self.config.startup_timeout_seconds
+        next_log_at = time.time()
         while time.time() < deadline:
             if self.is_healthy():
+                logger.info("本地 AI 服务启动成功。")
                 return self.health(), self.models()
+            now = time.time()
+            if now >= next_log_at:
+                remaining = int(deadline - now)
+                logger.info("等待本地 AI 服务就绪，剩余约 %s 秒。", max(0, remaining))
+                next_log_at = now + 10
             time.sleep(2)
 
+        logger.error("等待本地 AI 服务启动超时，超时时间 %s 秒。", self.config.startup_timeout_seconds)
         raise RuntimeError("Timed out waiting for llama.cpp service to become healthy.")
 
     def start_server(self) -> None:
         server_path = Path(self.config.server_path)
         model_path = Path(self.config.model_path)
+        logger.info("准备启动 llama.cpp: server_path=%s", server_path)
+        logger.info("准备启动 llama.cpp: model_path=%s", model_path)
+        if self.config.mmproj_path:
+            logger.info("准备启动 llama.cpp: mmproj_path=%s", self.config.mmproj_path)
         if not server_path.exists():
+            logger.error("LLAMACPP_SERVER_PATH 不存在: %s", server_path)
             raise FileNotFoundError(f"LLAMACPP_SERVER_PATH does not exist: {server_path}")
         if not model_path.exists():
+            logger.error("LLAMACPP_MODEL_PATH 不存在: %s", model_path)
             raise FileNotFoundError(f"LLAMACPP_MODEL_PATH does not exist: {model_path}")
 
         parsed = urlparse(self.config.base_url)
@@ -112,6 +138,8 @@ class LlamaCppClient:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = self.log_dir / "llama_server.out.log"
         stderr_path = self.log_dir / "llama_server.err.log"
+        logger.info("llama.cpp stdout 日志: %s", stdout_path)
+        logger.info("llama.cpp stderr 日志: %s", stderr_path)
         env = os.environ.copy()
         path_parts = [str(server_path.parent)]
         path_parts.extend(_expand_dll_dirs(self.config.extra_dll_dirs))
@@ -125,6 +153,7 @@ class LlamaCppClient:
             cwd=str(server_path.parent),
             env=env,
         )
+        logger.info("llama.cpp 进程已启动: pid=%s, host=%s, port=%s", self._process.pid, host, port)
 
     def shutdown_server(self) -> None:
         if not self._process:

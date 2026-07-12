@@ -47,6 +47,7 @@ LLAMACPP_EXTRA_DLL_DIRS=D:\CloudStation\Python\Project\vendor
 ```
 
 如果本地 `llama-server` 已经启动，保持 `LLAMACPP_AUTOSTART=false` 即可。若要由脚本自动启动，还需要在 `common.env` 中补充 `LLAMACPP_SERVER_PATH`、`LLAMACPP_MODEL_PATH` 和多模态模型需要的 `LLAMACPP_MMPROJ_PATH`。
+脚本会在检查和自动启动本地 AI 服务时输出日志，包括服务地址、模型名、自启动状态、`llama-server` 进程号，以及 `logs/llama_server.out.log` / `logs/llama_server.err.log` 路径。
 
 ### 2. 运行识别
 
@@ -78,9 +79,12 @@ python image_index_extract.py --input-dir C:\path\to\pngs
 
 - `output/image_index_extract/image_index_results.json`
 - `output/image_index_extract/image_index_results.csv`
+- `output/image_index_extract/image_index_results_deduped.json`
+- `output/image_index_extract/image_index_results_deduped.csv`
 - `output/image_index_extract/sequence_name_map.json`
 
 每条结果包含：原图片路径、图片文件名、识别出的序号、识别出的文件名、置信度、备注、错误信息和模型原始响应。
+`image_index_results_deduped.*` 会按 `sequence + file_name` 对识别明细去重，重复项保留置信度更高且无备注的记录；置信度相同时保留首次出现的记录。
 `sequence_name_map.json` 是最终去重后的“序号 -> 文件名”映射，可直接用于后续重命名或校验。
 
 ## 使用说明
@@ -118,6 +122,13 @@ python rename_files.py rules --folder C:\path\to\files --config rename_rules.yam
 python rename_files.py rules --folder C:\path\to\files --config rename_rules.yaml
 ```
 
+删除音频文件名尾部的 `｜多多罗` / `｜多多罗出品`：
+
+```bash
+python rename_files.py rules --folder C:\path\to\m4a --config remove_duoduoluo_suffix_rules.yaml --no-recursive --dry-run
+python rename_files.py rules --folder C:\path\to\m4a --config remove_duoduoluo_suffix_rules.yaml --no-recursive
+```
+
 将文件名中的集数补零，例如 `第1集` 改为 `第001集`：
 
 ```bash
@@ -137,6 +148,15 @@ python rename_files.py truncate --folder C:\path\to\files --char 【 --dry-run
 python rename_files.py regex-add --folder C:\path\to\files --pattern "第\d集" --add-string "审批单-" --position before --dry-run
 ```
 
+按图片识别 CSV 中的 `file_name` 匹配音频文件，并把 `sequence` 加到文件名前：
+
+```bash
+python rename_files.py csv-sequence-prefix --folder C:\path\to\m4a --csv output\image_index_extract\image_index_results_deduped.csv --dry-run
+python rename_files.py csv-sequence-prefix --folder C:\path\to\m4a --csv output\image_index_extract\image_index_results_deduped.csv
+```
+
+该命令默认只处理 `.m4a`，序号宽度按目标目录文件总数计算，并生成 `output/image_index_extract/m4a_sequence_prefix_report.csv` 匹配报告。无法唯一匹配的文件会跳过。
+
 ### 3. 主要函数说明
 
 - `rules`: 根据 YAML 配置进行通用替换和移除。
@@ -144,6 +164,7 @@ python rename_files.py regex-add --folder C:\path\to\files --pattern "第\d集" 
 - `truncate`: 删除文件名中指定字符及其后的所有内容。
 - `regex-add`: 匹配正则并在其前面（before）或后面（after）插入指定字符串。
 - `sequence-prefix` / `sequence-suffix` / `keep-name`: 按排序序号批量生成新文件名。
+- `csv-sequence-prefix`: 按 CSV 的 `file_name` 匹配文件，并用 `sequence` 添加序号前缀。
 
 ## 注意事项
 

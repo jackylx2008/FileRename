@@ -29,6 +29,7 @@
   python rename_files.py pad --folder C:\\path\\to\\files --prefix 第 --suffix 集
   python rename_files.py truncate --folder C:\\path\\to\\files --char 【 --dry-run
   python rename_files.py regex-add --folder C:\\path\\to\\files --pattern "第\\d集" --add-string "审批单-" --position before
+  python rename_files.py csv-sequence-prefix --folder C:\\path\\to\\m4a --csv output\\image_index_extract\\image_index_results_deduped.csv --dry-run
   python rename_files.py rollback-log --source-log logs/rename.log --dry-run
 
 输出：
@@ -38,9 +39,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import os
 import re
+import unicodedata
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -52,6 +56,33 @@ from logging_config import configure_utf8_stdio, get_logger, setup_logger
 USAGE = __doc__ or ""
 DEFAULT_LOG_FILE = "logs/rename.log"
 DEFAULT_CONFIG_FILE = "rename_rules.yaml"
+CHINESE_DIGIT_TEXT = {
+    "0": "零",
+    "1": "一",
+    "2": "二",
+    "3": "三",
+    "4": "四",
+    "5": "五",
+    "6": "六",
+    "7": "七",
+    "8": "八",
+    "9": "九",
+}
+CHINESE_DIGIT_VALUE = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    **{digit: int(digit) for digit in CHINESE_DIGIT_TEXT},
+}
 
 logger = get_logger(__name__)
 
@@ -308,6 +339,99 @@ def rename_files_keep_name(
     return apply_rename_plan(operations, dry_run=dry_run)
 
 
+def rename_files_with_csv_sequence_prefix(
+    folder_path: str | os.PathLike[str],
+    csv_path: str | os.PathLike[str],
+    file_extensions: str | Iterable[str] = ".m4a",
+    sequence_column: str = "sequence",
+    name_column: str = "file_name",
+    separator: str = "_",
+    width: int | None = None,
+    recursive: bool = False,
+    report_path: str | os.PathLike[str] | None = None,
+    dry_run: bool = False,
+) -> RenameSummary:
+    """按 CSV 中 file_name 匹配文件，并用 sequence 给原文件名添加序号前缀。"""
+    folder = require_folder(folder_path)
+    csv_file = Path(csv_path).expanduser()
+    if not csv_file.is_file():
+        raise FileNotFoundError(f"CSV 文件不存在: {csv_file}")
+
+    extensions = normalize_extensions(file_extensions)
+    files = sorted(iter_files(folder, recursive=recursive, extensions=extensions))
+    number_width = width or len(str(len(files)))
+    sequence_index, examples_by_key = read_sequence_csv_index(
+        csv_file,
+        sequence_column=sequence_column,
+        name_column=name_column,
+    )
+    file_key_counts = Counter(normalize_sequence_match_name(path.stem) for path in files)
+
+    operations: list[RenameOperation] = []
+    report_rows: list[dict[str, Any]] = []
+    stats: Counter[str] = Counter()
+
+    for path in files:
+        base_stem = strip_sequence_prefix(path.stem)
+        key = normalize_sequence_match_name(base_stem)
+        target_path: Path | None = None
+        sequence_text = ""
+        status = "matched"
+        reason = ""
+
+        if file_key_counts[key] > 1:
+            status = "skipped"
+            reason = "ambiguous_file_name"
+            stats[reason] += 1
+        else:
+            sequences = sequence_index.get(key, set())
+            if not sequences:
+                status = "skipped"
+                reason = "no_csv_match"
+                stats[reason] += 1
+            elif len(sequences) > 1:
+                status = "skipped"
+                reason = "ambiguous_sequence"
+                stats[reason] += 1
+            else:
+                sequence = next(iter(sequences))
+                sequence_width = max(number_width, len(str(sequence)))
+                sequence_text = f"{sequence:0{sequence_width}d}"
+                target_path = path.with_name(f"{sequence_text}{separator}{base_stem}{path.suffix}")
+                operations.append(RenameOperation(path, target_path))
+                stats["matched"] += 1
+
+        report_rows.append(
+            {
+                "status": status,
+                "reason": reason,
+                "sequence": sequence_text,
+                "old_name": path.name,
+                "new_name": target_path.name if target_path else "",
+                "normalized_name": key,
+                "csv_candidates": " | ".join(examples_by_key.get(key, [])),
+            }
+        )
+
+    resolved_report_path = (
+        Path(report_path).expanduser()
+        if report_path
+        else csv_file.with_name("m4a_sequence_prefix_report.csv")
+    )
+    write_match_report(resolved_report_path, report_rows)
+    logger.info(
+        "CSV 匹配报告已写入: %s, files=%s, matched=%s, no_csv_match=%s, ambiguous_sequence=%s, ambiguous_file_name=%s",
+        resolved_report_path,
+        len(files),
+        stats["matched"],
+        stats["no_csv_match"],
+        stats["ambiguous_sequence"],
+        stats["ambiguous_file_name"],
+    )
+
+    return apply_rename_plan(operations, dry_run=dry_run)
+
+
 def rollback_from_log(
     source_log: str | os.PathLike[str],
     folder_path: str | os.PathLike[str] | None = None,
@@ -409,6 +533,56 @@ def read_rename_operations_from_log(
     return operations
 
 
+def read_sequence_csv_index(
+    csv_path: Path,
+    sequence_column: str,
+    name_column: str,
+) -> tuple[dict[str, set[int]], dict[str, list[str]]]:
+    sequence_index: dict[str, set[int]] = defaultdict(set)
+    examples_by_key: dict[str, list[str]] = defaultdict(list)
+
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as file_obj:
+        reader = csv.DictReader(file_obj)
+        if not reader.fieldnames:
+            raise ValueError(f"CSV 文件没有表头: {csv_path}")
+        missing_columns = [
+            column
+            for column in (sequence_column, name_column)
+            if column not in reader.fieldnames
+        ]
+        if missing_columns:
+            raise ValueError(f"CSV 缺少列: {', '.join(missing_columns)}")
+
+        for row in reader:
+            sequence = str(row.get(sequence_column, "")).strip()
+            file_name = str(row.get(name_column, "")).strip()
+            if not sequence.isdigit() or not file_name:
+                continue
+            key = normalize_sequence_match_name(file_name)
+            sequence_index[key].add(int(sequence))
+            if len(examples_by_key[key]) < 5:
+                examples_by_key[key].append(f"{sequence}:{file_name}")
+
+    return sequence_index, examples_by_key
+
+
+def write_match_report(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "status",
+        "reason",
+        "sequence",
+        "old_name",
+        "new_name",
+        "normalized_name",
+        "csv_candidates",
+    ]
+    with path.open("w", encoding="utf-8-sig", newline="") as file_obj:
+        writer = csv.DictWriter(file_obj, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def is_relative_to_path(path: Path, parent: Path) -> bool:
     """兼容旧 Python 版本的 Path.is_relative_to。"""
     try:
@@ -452,6 +626,82 @@ def require_folder(folder_path: str | os.PathLike[str]) -> Path:
     if not folder.is_dir():
         raise NotADirectoryError(f"目标路径不是有效文件夹: {folder}")
     return folder
+
+
+def strip_sequence_prefix(stem: str) -> str:
+    """Remove an existing 001_ style prefix so the CSV prefix command is idempotent."""
+    return re.sub(r"^\d+_", "", stem).strip()
+
+
+def normalize_sequence_match_name(value: str) -> str:
+    """Normalize OCR CSV names and local file stems for conservative exact matching."""
+    text = unicodedata.normalize("NFKC", value or "")
+    text = re.sub(r"\.(m4a)$", "", text, flags=re.I)
+    text = strip_sequence_prefix(text)
+    text = (
+        text.replace("哆哆罗", "多多罗")
+        .replace("哆啰罗", "多多罗")
+        .replace("边克狐", "迈克狐")
+    )
+    text = normalize_mixed_chinese_digits(text)
+    text = normalize_chinese_ordinal_units(text)
+    return "".join(
+        char.lower()
+        for char in text
+        if char.isalnum() or "\u4e00" <= char <= "\u9fff"
+    )
+
+
+def normalize_mixed_chinese_digits(text: str) -> str:
+    for digit, chinese_digit in CHINESE_DIGIT_TEXT.items():
+        if digit == "0":
+            continue
+        text = text.replace(f"十{digit}", f"十{chinese_digit}")
+        text = re.sub(
+            rf"(?<!\d){digit}(季|个|案|轮|集|期|起|条)(?!\d)",
+            f"{chinese_digit}\\1",
+            text,
+        )
+    return text
+
+
+def normalize_chinese_ordinal_units(text: str) -> str:
+    def replace_match(match: re.Match[str]) -> str:
+        number = chinese_number_to_int(match.group("number"))
+        unit = match.group("unit")
+        if unit == "条":
+            unit = "案"
+        if number is None:
+            return match.group(0)
+        return f"第{number}{unit}"
+
+    return re.sub(
+        r"第(?P<number>[一二两三四五六七八九十零〇\d]+)(?P<unit>集|轮|期|季|案|条)",
+        replace_match,
+        text,
+    )
+
+
+def chinese_number_to_int(text: str) -> int | None:
+    if text.isdigit():
+        return int(text)
+    if text == "十":
+        return 10
+    if "十" in text:
+        left, _, right = text.partition("十")
+        tens = CHINESE_DIGIT_VALUE.get(left, 1) if left else 1
+        ones = CHINESE_DIGIT_VALUE.get(right, 0) if right else 0
+        if tens is None or ones is None:
+            return None
+        return tens * 10 + ones
+
+    total = 0
+    for char in text:
+        digit = CHINESE_DIGIT_VALUE.get(char)
+        if digit is None:
+            return None
+        total = total * 10 + digit
+    return total
 
 
 def pattern_to_regex_and_replacement(pattern: str, replacement: str) -> tuple[str, str]:
@@ -548,6 +798,19 @@ def build_parser() -> argparse.ArgumentParser:
     keep_parser.add_argument("--keep-suffix", default="", help="序号后固定后缀。")
     keep_parser.add_argument("--descending", action="store_true", help="按文件名降序。")
     keep_parser.set_defaults(handler=handle_keep_name)
+
+    csv_prefix_parser = add_common_folder_args(
+        subparsers.add_parser("csv-sequence-prefix", help="按 CSV file_name 匹配文件，并添加 sequence_ 前缀。"),
+        recursive_default=False,
+    )
+    csv_prefix_parser.add_argument("--csv", required=True, help="包含 sequence 和 file_name 列的 CSV。")
+    csv_prefix_parser.add_argument("--extension", action="append", help="只处理指定扩展名，可重复，默认 .m4a。")
+    csv_prefix_parser.add_argument("--sequence-column", default="sequence", help="CSV 序号列名，默认 sequence。")
+    csv_prefix_parser.add_argument("--name-column", default="file_name", help="CSV 文件名列名，默认 file_name。")
+    csv_prefix_parser.add_argument("--separator", default="_", help="序号和原文件名之间的分隔符，默认 _。")
+    csv_prefix_parser.add_argument("--width", type=int, help="序号补零宽度；默认按目标文件总数计算。")
+    csv_prefix_parser.add_argument("--report", help="匹配报告 CSV 路径；默认写到输入 CSV 同目录。")
+    csv_prefix_parser.set_defaults(handler=handle_csv_sequence_prefix)
 
     rollback_parser = subparsers.add_parser(
         "rollback-log",
@@ -663,6 +926,21 @@ def handle_keep_name(args: argparse.Namespace) -> RenameSummary:
         name_prefix=args.name_prefix,
         keep_suffix=args.keep_suffix,
         ascending=not args.descending,
+        dry_run=args.dry_run,
+    )
+
+
+def handle_csv_sequence_prefix(args: argparse.Namespace) -> RenameSummary:
+    return rename_files_with_csv_sequence_prefix(
+        args.folder,
+        csv_path=args.csv,
+        file_extensions=args.extension or [".m4a"],
+        sequence_column=args.sequence_column,
+        name_column=args.name_column,
+        separator=args.separator,
+        width=args.width,
+        recursive=should_recurse(args, default=False),
+        report_path=args.report,
         dry_run=args.dry_run,
     )
 

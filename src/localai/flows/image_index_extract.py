@@ -40,6 +40,8 @@ def run(config: dict[str, Any], options: ImageIndexExtractOptions) -> dict[str, 
     output_dir = Path(options.output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     if not images:
+        deduped_json_path = output_dir / "image_index_results_deduped.json"
+        deduped_csv_path = output_dir / "image_index_results_deduped.csv"
         result = {
             "input_dir": str(input_dir),
             "image_count": 0,
@@ -47,17 +49,28 @@ def run(config: dict[str, Any], options: ImageIndexExtractOptions) -> dict[str, 
             "error_count": 0,
             "json_path": str(output_dir / "image_index_results.json"),
             "csv_path": str(output_dir / "image_index_results.csv"),
+            "deduped_json_path": str(deduped_json_path),
+            "deduped_csv_path": str(deduped_csv_path),
             "mapping_path": str(output_dir / "sequence_name_map.json"),
             "items": [],
+            "deduped_items": [],
             "mapping": {},
             "dedupe": {
+                "unique_item_count": 0,
                 "unique_sequence_count": 0,
                 "duplicate_item_count": 0,
+                "duplicate_key_count": 0,
+                "skipped_item_count": 0,
+                "sequence_duplicate_item_count": 0,
+                "conflict_count": 0,
                 "conflicts": [],
+                "duplicates": [],
             },
         }
         _write_json(Path(result["json_path"]), result)
         _write_csv(Path(result["csv_path"]), [])
+        _write_json(deduped_json_path, {"items": [], "dedupe": result["dedupe"]})
+        _write_csv(deduped_csv_path, [])
         _write_json(Path(result["mapping_path"]), {})
         return result
 
@@ -66,7 +79,9 @@ def run(config: dict[str, Any], options: ImageIndexExtractOptions) -> dict[str, 
     rows: list[dict[str, Any]] = []
 
     try:
+        logger.info("初始化本地 AI 客户端并检查服务状态。")
         _, models = client.ensure_server()
+        logger.info("本地 AI 模型列表获取成功，开始校验模型: %s", llama_config.model)
         client.assert_model_available(models)
         for index, image_path in enumerate(images, start=1):
             logger.info("识别图片 %s/%s: %s", index, len(images), image_path)
@@ -74,7 +89,18 @@ def run(config: dict[str, Any], options: ImageIndexExtractOptions) -> dict[str, 
     finally:
         client.shutdown_server()
 
-    mapping, dedupe = _build_sequence_mapping(rows)
+    deduped_rows, item_dedupe = _dedupe_recognized_items(rows)
+    mapping, mapping_dedupe = _build_sequence_mapping(deduped_rows)
+    dedupe = {
+        **item_dedupe,
+        "unique_sequence_count": mapping_dedupe["unique_sequence_count"],
+        "sequence_duplicate_item_count": mapping_dedupe["duplicate_item_count"],
+        "mapping_skipped_item_count": mapping_dedupe["skipped_item_count"],
+        "conflict_count": mapping_dedupe["conflict_count"],
+        "conflicts": mapping_dedupe["conflicts"],
+    }
+    deduped_json_path = output_dir / "image_index_results_deduped.json"
+    deduped_csv_path = output_dir / "image_index_results_deduped.csv"
     result = {
         "input_dir": str(input_dir),
         "image_count": len(images),
@@ -82,12 +108,17 @@ def run(config: dict[str, Any], options: ImageIndexExtractOptions) -> dict[str, 
         "error_count": len([row for row in rows if row.get("error")]),
         "json_path": str(output_dir / "image_index_results.json"),
         "csv_path": str(output_dir / "image_index_results.csv"),
+        "deduped_json_path": str(deduped_json_path),
+        "deduped_csv_path": str(deduped_csv_path),
         "mapping_path": str(output_dir / "sequence_name_map.json"),
         "mapping": mapping,
         "dedupe": dedupe,
         "items": rows,
+        "deduped_items": deduped_rows,
     }
     _write_json(Path(result["json_path"]), result)
+    _write_json(deduped_json_path, {"items": deduped_rows, "dedupe": dedupe})
+    _write_csv(deduped_csv_path, deduped_rows)
     _write_json(Path(result["mapping_path"]), mapping)
     _write_csv(Path(result["csv_path"]), rows)
     return result
@@ -197,8 +228,61 @@ def _error_row(image_path: Path, error: str, raw_response: str) -> dict[str, Any
     }
 
 
-def _write_json(path: Path, data: dict[str, Any]) -> None:
+def _write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _dedupe_recognized_items(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    selected_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    source_rows_by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    skipped_count = 0
+
+    for row in rows:
+        if row.get("error"):
+            skipped_count += 1
+            continue
+        sequence = _normalize_sequence(row.get("sequence", ""))
+        file_name = _normalize_file_name(row.get("file_name", ""))
+        if not sequence or not file_name:
+            skipped_count += 1
+            continue
+
+        normalized_row = dict(row)
+        normalized_row["sequence"] = sequence
+        normalized_row["file_name"] = file_name
+        key = (sequence, file_name)
+        source_rows_by_key[key].append(normalized_row)
+
+        selected_row = selected_by_key.get(key)
+        if selected_row is None or _row_quality_key(normalized_row) > _row_quality_key(selected_row):
+            selected_by_key[key] = normalized_row
+
+    deduped_rows = [
+        selected_by_key[key]
+        for key in sorted(selected_by_key, key=lambda item: (_sequence_sort_key(item[0]), item[1]))
+    ]
+    duplicate_groups = [
+        {
+            "sequence": sequence,
+            "file_name": file_name,
+            "count": len(group_rows),
+            "kept_image_file": selected_by_key[(sequence, file_name)].get("image_file", ""),
+            "source_images": sorted({row.get("image_file", "") for row in group_rows if row.get("image_file")}),
+        }
+        for (sequence, file_name), group_rows in sorted(
+            source_rows_by_key.items(),
+            key=lambda item: (_sequence_sort_key(item[0][0]), item[0][1]),
+        )
+        if len(group_rows) > 1
+    ]
+    dedupe = {
+        "unique_item_count": len(deduped_rows),
+        "duplicate_item_count": sum(group["count"] - 1 for group in duplicate_groups),
+        "duplicate_key_count": len(duplicate_groups),
+        "skipped_item_count": skipped_count,
+        "duplicates": duplicate_groups,
+    }
+    return deduped_rows, dedupe
 
 
 def _build_sequence_mapping(rows: list[dict[str, Any]]) -> tuple[dict[str, str], dict[str, Any]]:
@@ -288,6 +372,13 @@ def _coerce_confidence(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _row_quality_key(row: dict[str, Any]) -> tuple[float, bool]:
+    return (
+        _coerce_confidence(row.get("confidence")),
+        len(str(row.get("notes", ""))) == 0,
+    )
 
 
 def _sequence_sort_key(sequence: str) -> tuple[int, int | str]:
