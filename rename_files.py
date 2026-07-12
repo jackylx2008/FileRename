@@ -20,12 +20,14 @@
   --recursive     递归处理子目录。
   --log-level     日志级别，默认 INFO。
   --log-file      日志文件，默认 logs/rename.log。
+  rollback-log     从 rename.log 中读取成功重命名记录并反向还原。
 
 示例：
   python rename_files.py rules --folder C:\\path\\to\\files --config rename_rules.yaml --dry-run
   python rename_files.py pad --folder C:\\path\\to\\files --prefix 第 --suffix 集
   python rename_files.py truncate --folder C:\\path\\to\\files --char 【 --dry-run
   python rename_files.py regex-add --folder C:\\path\\to\\files --pattern "第\\d集" --add-string "审批单-" --position before
+  python rename_files.py rollback-log --source-log logs/rename.log --dry-run
 
 输出：
   控制台输出执行摘要，详细重命名计划和结果写入 logs/rename.log。
@@ -276,6 +278,21 @@ def rename_files_keep_name(
     return apply_rename_plan(operations, dry_run=dry_run)
 
 
+def rollback_from_log(
+    source_log: str | os.PathLike[str],
+    folder_path: str | os.PathLike[str] | None = None,
+    dry_run: bool = False,
+) -> RenameSummary:
+    """从日志中的成功重命名记录生成反向操作并执行回滚。"""
+    operations = read_rename_operations_from_log(source_log, folder_path=folder_path)
+    rollback_operations = [
+        RenameOperation(operation.new_path, operation.old_path)
+        for operation in reversed(operations)
+    ]
+    logger.info("从日志读取到可回滚记录: %s", len(rollback_operations))
+    return apply_rename_plan(rollback_operations, dry_run=dry_run)
+
+
 def apply_rename_plan(
     operations: list[RenameOperation],
     dry_run: bool = False,
@@ -328,6 +345,47 @@ def apply_rename_plan(
             logger.error("重命名失败: %s -> %s, 原因: %s", operation.old_path, operation.new_path, exc)
 
     return summary
+
+
+def read_rename_operations_from_log(
+    source_log: str | os.PathLike[str],
+    folder_path: str | os.PathLike[str] | None = None,
+) -> list[RenameOperation]:
+    """解析 rename.log 中的“重命名成功: old -> new”记录。"""
+    log_path = Path(source_log).expanduser()
+    if not log_path.is_file():
+        raise FileNotFoundError(f"日志文件不存在: {log_path}")
+
+    folder: Path | None = Path(folder_path).expanduser() if folder_path else None
+    operations: list[RenameOperation] = []
+    marker = "重命名成功: "
+    separator = " -> "
+
+    with log_path.open("r", encoding="utf-8", errors="replace") as log_file:
+        for line_number, line in enumerate(log_file, start=1):
+            if marker not in line:
+                continue
+            payload = line.split(marker, 1)[1].strip()
+            if separator not in payload:
+                logger.warning("无法解析日志第 %s 行: %s", line_number, line.rstrip())
+                continue
+            old_raw, new_raw = payload.split(separator, 1)
+            old_path = Path(old_raw.strip())
+            new_path = Path(new_raw.strip())
+            if folder and not is_relative_to_path(old_path, folder):
+                continue
+            operations.append(RenameOperation(old_path, new_path))
+
+    return operations
+
+
+def is_relative_to_path(path: Path, parent: Path) -> bool:
+    """兼容旧 Python 版本的 Path.is_relative_to。"""
+    try:
+        path.resolve(strict=False).relative_to(parent.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
 
 
 def iter_files(
@@ -455,6 +513,19 @@ def build_parser() -> argparse.ArgumentParser:
     keep_parser.add_argument("--descending", action="store_true", help="按文件名降序。")
     keep_parser.set_defaults(handler=handle_keep_name)
 
+    rollback_parser = subparsers.add_parser(
+        "rollback-log",
+        help="从日志中的成功重命名记录反向回滚。",
+    )
+    rollback_parser.add_argument(
+        "--source-log",
+        default=DEFAULT_LOG_FILE,
+        help="要解析的原始重命名日志，默认 logs/rename.log。",
+    )
+    rollback_parser.add_argument("--folder", help="只回滚指定目录下的记录。")
+    rollback_parser.add_argument("--dry-run", action="store_true", help="仅预览，不真正重命名。")
+    rollback_parser.set_defaults(handler=handle_rollback_log)
+
     return parser
 
 
@@ -555,6 +626,14 @@ def handle_keep_name(args: argparse.Namespace) -> RenameSummary:
         name_prefix=args.name_prefix,
         keep_suffix=args.keep_suffix,
         ascending=not args.descending,
+        dry_run=args.dry_run,
+    )
+
+
+def handle_rollback_log(args: argparse.Namespace) -> RenameSummary:
+    return rollback_from_log(
+        args.source_log,
+        folder_path=args.folder,
         dry_run=args.dry_run,
     )
 
