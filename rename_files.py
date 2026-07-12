@@ -100,9 +100,9 @@ def rename_files_in_folder(
 
     operations: list[RenameOperation] = []
     for path in iter_files(folder, recursive=recursive, extensions=extensions):
-        new_name = path.name
+        new_stem = path.stem
         for pattern in remove_patterns:
-            new_name = re.sub(str(pattern), "", new_name)
+            new_stem = re.sub(str(pattern), "", new_stem)
         for rule in replace_patterns:
             pattern = str(rule.get("pattern", ""))
             replacement = str(rule.get("replacement", ""))
@@ -110,10 +110,11 @@ def rename_files_in_folder(
                 regex_pattern, regex_replacement = pattern_to_regex_and_replacement(
                     pattern, replacement
                 )
-                new_name = re.sub(regex_pattern, regex_replacement, new_name)
+                new_stem = re.sub(regex_pattern, regex_replacement, new_stem)
             else:
-                new_name = re.sub(pattern, replacement, new_name)
-        new_name = new_name.strip()
+                new_stem = re.sub(pattern, replacement, new_stem)
+        new_stem = new_stem.strip()
+        new_name = f"{new_stem}{path.suffix}" if new_stem else ""
         if new_name and new_name != path.name:
             operations.append(RenameOperation(path, path.with_name(new_name)))
 
