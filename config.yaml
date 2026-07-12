@@ -1,0 +1,25 @@
+app:
+  log_level: "${LOG_LEVEL:-INFO}"
+
+llamacpp:
+  base_url: "${LLAMACPP_BASE_URL:-http://127.0.0.1:8080/v1}"
+  model: "${LLAMACPP_MODEL:-Qwen3.6-27B-Q4_K_M}"
+  autostart: "${LLAMACPP_AUTOSTART:-false}"
+  server_path: "${LLAMACPP_SERVER_PATH:-}"
+  model_path: "${LLAMACPP_MODEL_PATH:-}"
+  mmproj_path: "${LLAMACPP_MMPROJ_PATH:-}"
+  extra_dll_dirs: "${LLAMACPP_EXTRA_DLL_DIRS:-D:\\CloudStation\\Python\\Project\\vendor}"
+  n_gpu_layers: "${LLAMACPP_N_GPU_LAYERS:-999}"
+  ctx_size: "${LLAMACPP_CTX_SIZE:-8192}"
+  reasoning: "${LLAMACPP_REASONING:-off}"
+  reasoning_budget: "${LLAMACPP_REASONING_BUDGET:-0}"
+
+flows:
+  image_index_extract:
+    input_dir: "${INPUT_PICTURES:-}"
+    output_dir: "${IMAGE_INDEX_OUTPUT_DIR:-output/image_index_extract}"
+    image_extensions:
+      - ".png"
+    recursive: false
+    max_tokens: 4096
+    temperature: 0

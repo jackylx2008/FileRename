@@ -6,9 +6,14 @@
 *.m4a
 .env
 *.yaml
+!config.yaml
+!rename_rules.yaml
 *.json
 *.ini
 *.ttf
+common.env
+COMMON_PROJECT_SKILLS.md
+output/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

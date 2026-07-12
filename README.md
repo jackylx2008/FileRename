@@ -11,12 +11,16 @@
 - **正则表达式支持**：复杂的重命名逻辑可通过正则轻松实现。
 - **自动日志记录**：所有重命名操作都会记录在 `logs/` 目录下，方便追踪和回放。
 - **截断功能**：支持在指定字符处截断文件名（保留扩展名）。
+- **本地 AI 图片识别**：通过本地 Qwen/llama.cpp 多模态模型批量识别 PNG 图片中的序号和对应文件名。
 
 ## 文件结构
 
 - `rename_files.py`: 主运行脚本，包含核心重命名逻辑。
+- `image_index_extract.py`: 本地 AI 图片序号和文件名识别入口脚本。
 - `rename_rules.yaml`: 定义重命名规则的配置文件。
+- `config.yaml`: 本地 AI 工作流配置文件。
 - `logging_config.py`: 日志配置模块。
+- `src/localai/`: 本地 AI 基础模块和编排层。
 - `logs/`: 存放操作日志。
 
 ## 安装要求
@@ -27,6 +31,57 @@
 ```bash
 pip install pyyaml
 ```
+
+## 本地 AI 图片识别工作流
+
+### 1. 配置 common.env
+
+图片目录从 `common.env` 的 `INPUT_PICTURES` 读取，默认只处理该目录下的 `.png` 文件：
+
+```dotenv
+INPUT_PICTURES=C:\Users\your_name\Pictures\input
+LLAMACPP_BASE_URL=http://127.0.0.1:8080/v1
+LLAMACPP_MODEL=Qwen3.6-27B-Q4_K_M
+LLAMACPP_AUTOSTART=false
+LLAMACPP_EXTRA_DLL_DIRS=D:\CloudStation\Python\Project\vendor
+```
+
+如果本地 `llama-server` 已经启动，保持 `LLAMACPP_AUTOSTART=false` 即可。若要由脚本自动启动，还需要在 `common.env` 中补充 `LLAMACPP_SERVER_PATH`、`LLAMACPP_MODEL_PATH` 和多模态模型需要的 `LLAMACPP_MMPROJ_PATH`。
+
+### 2. 运行识别
+
+```bash
+python image_index_extract.py
+```
+
+调试时可只识别前几张：
+
+```bash
+python image_index_extract.py --limit 3
+```
+
+如果单张图片中条目很多，可提高模型输出上限：
+
+```bash
+python image_index_extract.py --limit 1 --max-tokens 4096
+```
+
+也可以临时覆盖图片目录：
+
+```bash
+python image_index_extract.py --input-dir C:\path\to\pngs
+```
+
+### 3. 输出结果
+
+默认输出到：
+
+- `output/image_index_extract/image_index_results.json`
+- `output/image_index_extract/image_index_results.csv`
+- `output/image_index_extract/sequence_name_map.json`
+
+每条结果包含：原图片路径、图片文件名、识别出的序号、识别出的文件名、置信度、备注、错误信息和模型原始响应。
+`sequence_name_map.json` 是最终去重后的“序号 -> 文件名”映射，可直接用于后续重命名或校验。
 
 ## 使用说明
 
