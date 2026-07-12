@@ -103,18 +103,47 @@ replace_patterns:
 
 ### 2. 运行脚本
 
-修改 `rename_files.py` 中 `if __name__ == "__main__":` 部分的 `target_folder` 路径，然后运行：
+`rename_files.py` 已改为 CLI 方式运行，不需要再修改源码中的目标路径。先用 `--dry-run` 预览，再去掉 `--dry-run` 执行真实重命名。
+
+查看全部命令：
 
 ```bash
-python rename_files.py
+python rename_files.py --help
+```
+
+按 `rename_rules.yaml` 的移除/替换规则重命名：
+
+```bash
+python rename_files.py rules --folder C:\path\to\files --config rename_rules.yaml --dry-run
+python rename_files.py rules --folder C:\path\to\files --config rename_rules.yaml
+```
+
+将文件名中的集数补零，例如 `第1集` 改为 `第001集`：
+
+```bash
+python rename_files.py pad --folder C:\path\to\files --prefix 第 --suffix 集 --dry-run
+python rename_files.py pad --folder C:\path\to\files --prefix 第 --suffix 集
+```
+
+按指定字符截断文件名：
+
+```bash
+python rename_files.py truncate --folder C:\path\to\files --char 【 --dry-run
+```
+
+正则匹配后插入字符串：
+
+```bash
+python rename_files.py regex-add --folder C:\path\to\files --pattern "第\d集" --add-string "审批单-" --position before --dry-run
 ```
 
 ### 3. 主要函数说明
 
-- `rename_files_in_folder(folder_path, config)`: 根据 YAML 配置进行通用替换和移除。
-- `rename_files_with_padded_numbers(folder_path, prefix, suffix)`: 对文件名中的数字进行补零，例如将 ` 第1集 ` 补零为 ` 第01集 `。
-- `rename_files_by_regex(config, add_string, position)`: 匹配 `regex_pattern` 并在其前面（before）或后面（after）插入指定的字符串。
-- `truncate_filename_after_char(folder_path, trunc_char)`: 删除文件名中指定字符及其后的所有内容。
+- `rules`: 根据 YAML 配置进行通用替换和移除。
+- `pad`: 对文件名中的数字进行补零，例如将 `第1集` 补零为 `第001集`。
+- `truncate`: 删除文件名中指定字符及其后的所有内容。
+- `regex-add`: 匹配正则并在其前面（before）或后面（after）插入指定字符串。
+- `sequence-prefix` / `sequence-suffix` / `keep-name`: 按排序序号批量生成新文件名。
 
 ## 注意事项
 
