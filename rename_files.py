@@ -18,12 +18,14 @@
 可选参数：
   --dry-run        仅预览，不真正重命名。
   --recursive     递归处理子目录。
+  --replace-scope  控制 replace_patterns 的作用范围。
   --log-level     日志级别，默认 INFO。
   --log-file      日志文件，默认 logs/rename.log。
   rollback-log     从 rename.log 中读取成功重命名记录并反向还原。
 
 示例：
   python rename_files.py rules --folder C:\\path\\to\\files --config rename_rules.yaml --dry-run
+  python rename_files.py rules --folder C:\\path\\to\\files --config rename_rules.yaml --replace-scope episode-number
   python rename_files.py pad --folder C:\\path\\to\\files --prefix 第 --suffix 集
   python rename_files.py truncate --folder C:\\path\\to\\files --char 【 --dry-run
   python rename_files.py regex-add --folder C:\\path\\to\\files --pattern "第\\d集" --add-string "审批单-" --position before
@@ -86,8 +88,12 @@ def rename_files_in_folder(
     config: dict[str, Any],
     recursive: bool = True,
     dry_run: bool = False,
+    replace_scope: str = "all",
 ) -> RenameSummary:
     """根据 YAML 中的 remove_patterns 和 replace_patterns 批量重命名。"""
+    if replace_scope not in {"all", "episode-number"}:
+        raise ValueError("--replace-scope 必须是 all 或 episode-number")
+
     folder = require_folder(folder_path)
     remove_patterns = config.get("remove_patterns", []) or []
     replace_patterns = config.get("replace_patterns", []) or []
@@ -105,22 +111,46 @@ def rename_files_in_folder(
         new_stem = path.stem
         for pattern in remove_patterns:
             new_stem = re.sub(str(pattern), "", new_stem)
-        for rule in replace_patterns:
-            pattern = str(rule.get("pattern", ""))
-            replacement = str(rule.get("replacement", ""))
-            if "%d" in pattern:
-                regex_pattern, regex_replacement = pattern_to_regex_and_replacement(
-                    pattern, replacement
-                )
-                new_stem = re.sub(regex_pattern, regex_replacement, new_stem)
-            else:
-                new_stem = re.sub(pattern, replacement, new_stem)
+        if replace_scope == "episode-number":
+            new_stem = apply_episode_number_replace_patterns(new_stem, replace_patterns)
+        else:
+            new_stem = apply_replace_patterns(new_stem, replace_patterns)
         new_stem = new_stem.strip()
         new_name = f"{new_stem}{path.suffix}" if new_stem else ""
         if new_name and new_name != path.name:
             operations.append(RenameOperation(path, path.with_name(new_name)))
 
     return apply_rename_plan(operations, dry_run=dry_run)
+
+
+def apply_replace_patterns(text: str, replace_patterns: Iterable[dict[str, Any]]) -> str:
+    """按配置顺序应用 replace_patterns。"""
+    result = text
+    for rule in replace_patterns:
+        pattern = str(rule.get("pattern", ""))
+        replacement = str(rule.get("replacement", ""))
+        if "%d" in pattern:
+            regex_pattern, regex_replacement = pattern_to_regex_and_replacement(
+                pattern, replacement
+            )
+            result = re.sub(regex_pattern, regex_replacement, result)
+        else:
+            result = re.sub(pattern, replacement, result)
+    return result
+
+
+def apply_episode_number_replace_patterns(
+    stem: str,
+    replace_patterns: Iterable[dict[str, Any]],
+) -> str:
+    """只替换“第...集”中间的数字，避免影响专辑编号、年份或文件尾号。"""
+
+    def replace_episode_number(match: re.Match[str]) -> str:
+        number_text = match.group("number")
+        replaced_number = apply_replace_patterns(number_text, replace_patterns)
+        return f"第{replaced_number}集"
+
+    return re.sub(r"第(?P<number>\d+)集", replace_episode_number, stem)
 
 
 def truncate_filename_after_char(
@@ -453,6 +483,12 @@ def build_parser() -> argparse.ArgumentParser:
         recursive_default=True,
     )
     rules_parser.add_argument("--config", default=DEFAULT_CONFIG_FILE, help="YAML 规则文件。")
+    rules_parser.add_argument(
+        "--replace-scope",
+        choices=("all", "episode-number"),
+        default="all",
+        help="replace_patterns 作用范围；episode-number 只处理第...集中的数字。",
+    )
     rules_parser.set_defaults(handler=handle_rules)
 
     pad_parser = add_common_folder_args(
@@ -559,6 +595,7 @@ def handle_rules(args: argparse.Namespace) -> RenameSummary:
         config,
         recursive=should_recurse(args, default=True),
         dry_run=args.dry_run,
+        replace_scope=args.replace_scope,
     )
 
 
