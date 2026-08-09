@@ -9,7 +9,7 @@
 - **批量替换图案**：将文件名中的特定部分替换为新内容。
 - **数字补全 (Padded Numbers)**：支持将文件名中的集数/卷数自动补零（如 `1` 变为 `01`）。
 - **正则表达式支持**：复杂的重命名逻辑可通过正则轻松实现。
-- **自动日志记录**：所有重命名操作都会记录在 `logs/` 目录下，方便追踪和回放。
+- **自动日志与回滚**：操作会同时输出到控制台和 `logs/` 下的 UTF-8 滚动日志，可按成功记录反向回滚。
 - **截断功能**：支持在指定字符处截断文件名（保留扩展名）。
 - **本地 AI 图片识别**：通过本地 Qwen/llama.cpp 多模态模型批量识别 PNG 图片中的序号和对应文件名。
 
@@ -22,6 +22,8 @@
 - `logging_config.py`: 日志配置模块。
 - `src/localai/`: 本地 AI 基础模块和编排层。
 - `logs/`: 存放操作日志。
+
+详细环境说明见 [`LOCAL_AI_RUNTIME_SETUP.md`](LOCAL_AI_RUNTIME_SETUP.md)，GitHub 同步与排错见 [`GitHub.md`](GitHub.md)。
 
 ## 安装要求
 
@@ -122,6 +124,12 @@ python rename_files.py rules --folder C:\path\to\files --config rename_rules.yam
 python rename_files.py rules --folder C:\path\to\files --config rename_rules.yaml
 ```
 
+如果只希望替换 `第...集` 中间的数字，避免影响年份或其他编号：
+
+```bash
+python rename_files.py rules --folder C:\path\to\files --config rename_rules.yaml --replace-scope episode-number --dry-run
+```
+
 删除音频文件名尾部的 `｜多多罗` / `｜多多罗出品`：
 
 ```bash
@@ -157,6 +165,13 @@ python rename_files.py csv-sequence-prefix --folder C:\path\to\m4a --csv output\
 
 该命令默认只处理 `.m4a`，序号宽度按目标目录文件总数计算，并生成 `output/image_index_extract/m4a_sequence_prefix_report.csv` 匹配报告。无法唯一匹配的文件会跳过。
 
+根据日志回滚已成功执行的重命名（建议先预览）：
+
+```bash
+python rename_files.py rollback-log --source-log logs/rename.log --dry-run
+python rename_files.py rollback-log --source-log logs/rename.log
+```
+
 ### 3. 主要函数说明
 
 - `rules`: 根据 YAML 配置进行通用替换和移除。
@@ -165,8 +180,9 @@ python rename_files.py csv-sequence-prefix --folder C:\path\to\m4a --csv output\
 - `regex-add`: 匹配正则并在其前面（before）或后面（after）插入指定字符串。
 - `sequence-prefix` / `sequence-suffix` / `keep-name`: 按排序序号批量生成新文件名。
 - `csv-sequence-prefix`: 按 CSV 的 `file_name` 匹配文件，并用 `sequence` 添加序号前缀。
+- `rollback-log`: 解析日志中的成功重命名记录，并按相反顺序恢复原文件名。
 
 ## 注意事项
 
 - **备份数据**：在对大量重要文件执行批量操作前，建议先在备份文件夹中进行测试。
-- **日志查看**：如果重命名结果不如预期，请检查 `logs/rename.log` 查看详细的操作输出和错误信息。
+- **日志查看**：如果重命名结果不如预期，请检查 `logs/rename.log`；单个日志最大 10 MiB，最多保留 5 个备份。
